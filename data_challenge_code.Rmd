@@ -1,0 +1,829 @@
+---
+title: "Data Challenge Code"
+author: "Charlotte Imbert"
+output: html_document
+date: "2025-01-15"
+---
+```{r}
+# load the packages needed. install them first if you have not already
+library(tidyverse)
+library(imputeR)
+library(VIM)
+library(naniar)
+library(shiny)
+library(mice)
+library(ggcorrplot)
+library(corrplot)
+library(pheatmap)
+library(glmnet)
+library(MASS)
+library(ranger)
+library(randomForest)
+library(caret)
+library(e1071)
+library(FSA)
+```
+
+```{r}
+# read in the data (accessed at CSAS website and downloaded to local machine)
+
+data<- read.csv("statcast_pitch_swing_data_20240402_20241030_with_arm_angle2.csv")
+
+# For the judges: I used the most recent data file uploaded to the shared OneDrive folder, ending in 'arm_angle2.csv'. Please ensure that you have this file downloaded to your local machine and in the current working directory.
+```
+
+```{r}
+# examine which variables are in the dataset
+colnames(data)
+```
+
+```{r}
+# visualize the missingness to understand which variables can be removed (those with very large numbers of NAs)
+gg_miss_var(data)
+ggsave("full_missing_data.jpg", width = 10, height = 10, dpi = 300)
+```
+
+```{r}
+# removing the variables that have more than 3/4 of the observations missing (and deprecated variables)
+
+missing_remove<- c("umpire", "tfs_zulu_deprecated", "tfs_deprecated", "sv_id",  "spin_rate_deprecated", "spin_dir", "break_length_deprecated", "break_angle_deprecated", "on_3b", "launch_speed_angle", "estimated_slg_using_speedangle", "estimated_ba_using_speedangle", "hc_y", "hc_x", "on_2b", "hit_location", "estimated_woba_using_speedangle", "woba_denom","woba_value", "iso_value", "babip_value", "on_1b")
+
+cleaned_data <- data[, !names(data) %in% missing_remove]
+```
+
+```{r}
+# visualize remaining missingness in the cleaned data
+gg_miss_var(cleaned_data)
+ggsave("half_or_less_missing.jpg", width = 10, height = 10, dpi = 300)
+gg_miss_upset(cleaned_data)
+
+# check which variables have complete observations
+complete_vars <- colnames(cleaned_data)[colSums(is.na(cleaned_data)) == 0]
+print(complete_vars)
+```
+```{r}
+# group pitch outcomes into 4 categories
+cleaned_data<- cleaned_data |>
+  mutate(description_grouped = case_when(
+    description %in% c("ball", "blocked_ball", "pitchout", "hit_by_pitch") ~ "ball",
+    description %in% c("bunt_foul_tip", "foul", "foul_bunt", "foul_tip") ~ "foul",
+    description %in% c("called_strike", "swinging_strike", "swinging_strike_blocked", "missed_bunt") ~ "strike",
+    description %in% c("hit_into_play") ~ "hit" 
+  ))
+
+# we are interested in swings, so remove balls and called strikes
+cleaned_data<- cleaned_data |>
+  filter(description_grouped != "ball") |>
+  filter(description != "called_strike")
+```
+
+```{r}
+# remove some variables before imputation - first, those with near zero variance
+nearZeroVar(cleaned_data)
+#corresponds to game_type, game_year, of_alignment, delta_home_win_exp
+```
+
+```{r}
+# next remove variables deemed unimportant to batter pitcher interaction
+
+irrelevant_cols_to_remove <- c("game_date", "player_name", "batter", "pitcher", "des", "description", "home_win_exp", "bat_win_exp", "game_type", "home_team", "away_team", "if_fielding_alignment", "of_fielding_alignment", "bb_type", "pitch_name", "game_year", "delta_home_win_exp", "game_pk", "fielder_2", "fielder_3", "fielder_4", "fielder_5", "fielder_6", "fielder_7", "fielder_8", "fielder_9", "post_home_score", "post_away_score", "post_bat_score", "post_fld_score", "home_score", "away_score", "inning_topbot", "at_bat_number", "age_pit_legacy", "age_bat_legacy", "n_thruorder_pitcher", "n_priorpa_thisgame_player_at_bat", "batter_days_until_next_game", "pitcher_days_until_next_game", "delta_pitcher_run_exp", "home_score_diff", "bat_score_diff", "type")
+
+cleaned_data <- cleaned_data[, !names(cleaned_data) %in% irrelevant_cols_to_remove]
+```
+
+```{r}
+# check if outcome classes are balanced
+table(cleaned_data$description_grouped)
+table(cleaned_data$events)
+```
+
+```{r}
+# observe trends in missingness
+missing_obs <- colSums(is.na(cleaned_data))
+missing_obs[missing_obs > 0]
+
+# many variables appear to be missing together
+```
+
+```{r}
+# observe first cluster of missing variables
+missing_together<- cleaned_data |>
+  dplyr::select(release_pos_x, release_speed, release_pos_z, zone, pfx_x, pfx_z, plate_x, plate_z, vx0, vy0, vz0, ax, ay, az, sz_top, sz_bot, release_pos_y, api_break_x_arm, api_break_z_with_gravity, api_break_x_batter_in)
+
+missing_binary <- missing_together |>
+  mutate(across(everything(), ~ ifelse(is.na(.), 1, 0)))
+
+missing_corr <- cor(missing_binary, use = "pairwise.complete.obs")
+print(missing_corr)
+```
+
+```{r}
+# observe second cluster of missing variables
+missing_together<- cleaned_data |>
+  dplyr::select(launch_speed, hit_distance_sc, launch_angle, hyper_speed)
+
+missing_binary <- missing_together |>
+mutate(across(everything(), ~ ifelse(is.na(.), 1, 0)))
+
+missing_corr <- cor(missing_binary, use = "pairwise.complete.obs")
+print(missing_corr)
+```
+
+```{r}
+gg_miss_upset(cleaned_data)
+ggsave("missing_clusters.jpg", width = 10, height = 10, dpi = 300)
+```
+
+```{r}
+# remove rows with clusters of missingness (i.e. observations where multiple variables have missing values)
+rows_rm1 <- cleaned_data |>
+  filter(is.na(release_pos_x) & is.na(release_speed) & is.na(release_pos_z) & is.na(zone) & is.na(sz_top) & is.na(sz_bot) & is.na(pfx_x) & is.na(pfx_z) & is.na(vx0) & is.na(vy0) & is.na(vz0) & is.na(plate_x) & is.na(plate_z) & is.na(ax) & is.na(ay) & is.na(az) & is.na(release_pos_y) & is.na(api_break_z_with_gravity) & is.na(api_break_x_batter_in) & is.na(api_break_x_arm))
+
+cleaned_data <- cleaned_data |>
+  anti_join(rows_rm1)
+
+rows_rm2<- cleaned_data |>
+  filter(is.na(launch_speed) & is.na(launch_angle) & is.na(hyper_speed) & is.na(hit_distance_sc))
+
+cleaned_data <- cleaned_data |>
+  anti_join(rows_rm2)
+```
+
+```{r}
+# identify which variables have missing values and therefore need to be imputed
+missing_obs <- colSums(is.na(cleaned_data))
+missing_obs[missing_obs > 0]
+```
+
+```{r}
+# median imputation for variables with low missingness (<500 NA values):
+cleaned_data$effective_speed[is.na(cleaned_data$effective_speed)] <- median(cleaned_data$effective_speed, na.rm = TRUE)
+cleaned_data$release_extension[is.na(cleaned_data$release_extension)] <- median(cleaned_data$effective_speed, na.rm = TRUE)
+cleaned_data$api_break_z_with_gravity[is.na(cleaned_data$api_break_z_with_gravity)] <- median(cleaned_data$api_break_z_with_gravity, na.rm = TRUE)
+cleaned_data$hit_distance_sc[is.na(cleaned_data$hit_distance_sc)] <- median(cleaned_data$hit_distance_sc, na.rm = TRUE)
+```
+
+```{r}
+# check which variables still need to be imputed
+missing_obs <- colSums(is.na(cleaned_data))
+missing_obs[missing_obs > 0]
+```
+
+```{r}
+# does bat speed and swing length missingness vary by play outcome?
+cleaned_data |>
+  group_by(description_grouped) |>
+  summarise(missing_bat_speed = mean(is.na(bat_speed)),
+    missing_swing_length = mean(is.na(swing_length)),
+    count = n()
+  )
+```
+
+```{r}
+# MICE imputation for remaining variables with missing values
+methods <- make.method(cleaned_data)
+mice_imputed_data <- mice(cleaned_data, method = methods, m = 5, maxit = 5, seed = 3)
+```
+
+```{r}
+# extract the first imputed dataset - this will be the one we will use for the rest of the wrangling
+completed_data <- complete(mice_imputed_data, 1)
+
+# check that variables were indeed imputed
+colSums(is.na(completed_data))
+```
+
+```{r}
+# observe the structure of the imputed dataset
+str(completed_data)
+```
+
+```{r}
+# feature engineering - creating new features based on existing ones
+completed_data<- completed_data |>
+  mutate(swing_combined = bat_speed * swing_length) |>
+  mutate(swing_efficiency = bat_speed / swing_length) |>
+  mutate(pitch_combined = release_speed * release_spin_rate)
+
+# to reduce dimensionality, combine some existing variables into one
+completed_data<- completed_data |>
+  mutate(batter_pitcher_opposite = ifelse(stand != p_throws, 1, 0)) |> # indicates 1 if pitcher hand is opposite to standing side, i.e. if handedness is the same
+  mutate(bat_team_lead = bat_score - fld_score) |>
+  mutate(sz_height = sz_top - sz_bot) |> # convert sz_top and sz_bottom into one feature, sz height
+  dplyr::select(-sz_top, -sz_bot, -stand, -p_throws, -bat_score, -fld_score)
+```
+
+```{r}
+# check for correlation between numeric features
+numeric_complete <- completed_data |>
+  dplyr::select(where(is.numeric))
+
+cor_matrix <- cor(numeric_complete, use = "complete.obs")
+
+# display correlations in a heatmap
+pdf("feature_correlations.pdf", width = 10, height = 8)
+pheatmap(cor_matrix, 
+         color = colorRampPalette(c("steelblue", "white", "darkorange1"))(100),
+         main = "Feature Correlations", cluster_cols = FALSE, cluster_rows = FALSE)
+```
+
+```{r}
+# filter for the highest correlations
+high_corr <- which(abs(cor_matrix) > 0.8 & abs(cor_matrix) < 1, arr.ind = TRUE)
+
+high_corr_pairs <- data.frame(
+  Feature1 = rownames(cor_matrix)[high_corr[, 1]],
+  Feature2 = colnames(cor_matrix)[high_corr[, 2]],
+  Correlation = cor_matrix[high_corr]
+)
+
+high_corr_pairs <- high_corr_pairs[!duplicated(t(apply(high_corr_pairs[, 1:2], 1, sort))), ]
+
+print(high_corr_pairs)
+```
+
+```{r}
+# remove one feature from each highly correlated pair. keep the engineered features
+correlated_rm<- c("vy0", "ay", "effective_speed", "api_break_z_with_gravity", "ax", "az", "vx0", "balls")
+completed_data <- completed_data[, !names(completed_data) %in% correlated_rm]
+```
+
+
+```{r}
+set.seed(3)
+
+# random Forest classifier for feature importance. Response variable: description_grouped (outcome - hit, strike or foul)
+# turn character variables to factors for RF classification
+completed_data$description_grouped<- as.factor(completed_data$description_grouped)
+completed_data$pitch_type<- as.factor(rf_data$pitch_type)
+completed_data$description_grouped<- as.factor(rf_data$description_grouped)
+
+# define predictor variables. Remove any variables that occur after impact as these would reveal a lot about the outcome and introduce bias
+rf_remove<- c("delta_run_exp", "events", "launch_speed", "launch_angle", "hit_distance_sc", "hyper_speed")
+rf_data<- completed_data[, !names(completed_data) %in% rf_remove]
+
+train_index <- createDataPartition(rf_data$description_grouped, p = 0.7, list = FALSE)
+train_data <- rf_data[train_index, ]
+test_data <- rf_data[-train_index, ]
+
+rf_model <- ranger(
+  description_grouped ~ ., 
+  data = train_data, 
+  mtry = 20, 
+  num.trees = 500,
+  importance = "impurity"
+)
+
+print(rf_model)
+
+predictions <- predict(rf_model, data = test_data)
+
+predicted_values <- predictions$predictions
+
+# confusion matrix for accuracy
+confusionMatrix(predicted_values, test_data$description_grouped)
+
+# reveal feature importance 
+feature_importance <- rf_model$variable.importance
+sort(feature_importance, decreasing = TRUE)
+```
+
+```{r}
+# visualize the feature importances
+importance <- as.data.frame(feature_importance)
+colnames(importance) <- c("Importance")
+importance$Variable <- rownames(importance)
+rownames(importance) <- NULL
+importance <- importance[order(-importance$Importance), ]
+
+ggplot(importance, aes(x = reorder(Variable, Importance), y = Importance)) +
+  geom_bar(stat = "identity", fill = "steelblue3") +
+  coord_flip() +
+  labs(
+    title = "Random Forest Feature Importance",
+    x = "Variable",
+    y = "Importance (Gini Impurity)"
+  ) +
+  theme_minimal()
+ggsave("rf_classifier_importance.jpg", height = 8, width = 10, dpi = 300)
+```
+
+```{r}
+# filter for only rows that were hits in play
+completed_data<- completed_data |>
+  filter(description_grouped == "hit")
+```
+
+```{r}
+# implement scoring system
+# assign values to the different values of 'events' by their offensive contribution
+event_values <- c(
+  "single" = 1.0,
+  "double" = 2.0,
+  "triple" = 3.0,
+  "home_run" = 4.0,
+  "sac_fly" = 0.8,
+  "sac_bunt" = 0.5,
+  "field_error" = 0.2,
+  "catcher_interf" = 0.5,
+  "field_out" = -1.0,
+  "force_out" = -1.0,
+  "double_play" = -2.0,
+  "grounded_into_double_play" = -2.0,
+  "fielders_choice" = -1.0,
+  "fielders_choice_out" = -1.0,
+  "triple_play" = -3.0,
+  "sac_fly_double_play" = -2.5
+)
+
+# create new variable incorporating these values
+completed_data <- completed_data |>
+  mutate(event_value = event_values[events],
+    batter_score = event_value * (1 + delta_run_exp)
+  )
+```
+
+```{r}
+# visualize bat score by bat speed
+completed_data |>
+  ggplot() +
+  geom_hex(aes(x = bat_speed, y = batter_score), bins = 300) +
+  scale_fill_viridis_c() +
+  labs(
+    title = "Bat Speed vs. Batter Score",
+    x = "Bat Speed",
+    y = "Batter Score",
+    fill = "Count"
+  ) +
+  theme_minimal()
+ggsave("bat_speed_score.jpg", height = 10, width = 10, dpi = 300)
+```
+
+```{r}
+# visualize bat score by swing length
+completed_data |>
+  ggplot() +
+  geom_hex(aes(x = swing_length, y = batter_score), bins = 150) +
+  scale_fill_viridis_c() +
+  labs(
+    title = "Swing Length vs. Batter Score",
+    x = "Swing Length",
+    y = "Batter Score",
+    fill = "Count"
+  ) +
+  theme_minimal()
+ggsave("swing_score.jpg", height = 10, width = 10, dpi = 300)
+```
+
+```{r}
+# visualize bat score by swing combined
+completed_data |>
+  ggplot() +
+  geom_hex(aes(x = swing_combined, y = batter_score), bins = 200) +
+  scale_fill_viridis_c() +
+  labs(
+    title = "Swing Combined vs. Batter Score",
+    x = "Swing Combined",
+    y = "Batter Score",
+    fill = "Count"
+  ) +
+  theme_minimal()
+ggsave("swing_combined_score.jpg", height = 10, width = 10, dpi = 300)
+```
+
+```{r}
+# visualize bat score by swing efficiency
+completed_data |>
+  ggplot() +
+  geom_hex(aes(x = swing_efficiency, y = batter_score), bins = 200) +
+  scale_fill_viridis_c() +
+  labs(
+    title = "Swing Efficiency vs. Batter Score",
+    x = "Swing Efficiency",
+    y = "Batter Score",
+    fill = "Count"
+  ) +
+  theme_minimal()
+ggsave("swing_efficiency_score.jpg", height = 10, width = 10, dpi = 300)
+```
+
+```{r}
+# create clusters based on bat speed and swing length
+set.seed(3)
+clusters <- scale(completed_data[, c("bat_speed", "swing_length")])
+kmeans_result <- kmeans(clusters, centers = 3)
+completed_data$cluster <- kmeans_result$cluster
+```
+
+```{r}
+# print median bat speed and swing length by cluster
+completed_data |>
+  group_by(cluster) |>
+  summarise(bat_speed_med = median(bat_speed), swing_length_med = median(swing_length), count = n())
+```
+
+```{r}
+# bat speed by cluster
+completed_data |>
+  ggplot() +
+  geom_histogram(aes(x = bat_speed, fill = cluster), color = "black", binwidth = 2) +
+  facet_wrap(~ cluster) +
+  labs(title = "Bat Speed Distributions by Cluster",
+       x = "Bat Speed",
+       y = "Frequency") +
+  theme(legend.position = "none")
+ggsave("cluster_speed.jpg", width = 10, height = 10, dpi = 300)
+
+# swing length by cluster
+completed_data |>
+  ggplot() +
+  geom_histogram(aes(x = swing_length, fill = cluster), color = "black", binwidth = 0.5) +
+  facet_wrap(~ cluster) +
+  labs(title = "Swing Length Distributions by Cluster",
+       x = "Swing Length",
+       y = "Frequency") +
+  theme(legend.position = "none")
+ggsave("cluster_swing.jpg", width = 10, height = 10, dpi = 300)
+
+# density plots for bat speed and swing length by cluster
+completed_data |>
+  ggplot() +
+  geom_bin2d(aes(x = bat_speed, y = swing_length), bins = 100) +
+  labs(title = "Bat Speed and Swing Length by Cluster",
+       x = "Bat Speed",
+       y = "Swing Length") +
+  facet_wrap(~ cluster)
+ggsave("cluster_bssl_heatmap.jpg", width = 10, height = 10, dpi = 300)
+
+completed_data |>
+  ggplot() +
+  geom_bin2d(aes(x = swing_efficiency, y = swing_combined), bins = 100) +
+  labs(title = "Swing Efficiency and Swing Combined by Cluster",
+       x = "Swing Efficiency",
+       y = "Swing Combined") +
+  facet_wrap(~ cluster)
+ggsave("cluster_composite_heatmap.jpg", width = 10, height = 10, dpi = 300)
+
+completed_data |>
+  ggplot() +
+  geom_histogram(aes(x = batter_score, fill = cluster), color = "black", binwidth = 0.2) +
+  facet_wrap(~ cluster) +
+  labs(title = "Batter Score Distributions by Cluster",
+       x = "Batter Score",
+       y = "Frequency") +
+  theme(legend.position = "none")
+ggsave("cluster_batter_score.jpg", width = 10, height = 10, dpi = 300)
+```
+
+```{r}
+# PERMUTATION TESTS for CLUSTERS - BATTER SCORE
+# calculate observed group means and variance (test statistic)
+observed_group_means_bs <- completed_data |>
+  group_by(cluster) |>
+  summarise(mean_batter_score = mean(batter_score, na.rm = TRUE), .groups = "drop")
+observed_stat_bs <- var(observed_group_means_bs$mean_batter_score, na.rm = TRUE)
+
+# permutation test
+set.seed(3)
+n_perms <- 1000
+cluster_bs_perm_stats <- numeric(n_perms)
+
+for (i in 1:n_perms) {
+  shuffled_data <- completed_data |>
+    mutate(shuffled_cluster = sample(cluster)) |>
+    group_by(shuffled_cluster) |>
+    summarise(mean_bs_cluster_shuffled = mean(batter_score, na.rm = TRUE), .groups = "drop")
+  
+  # check if all clusters are present and replace missing with 0 if necessary
+  all_clusters <- unique(completed_data$cluster)
+  shuffled_means <- shuffled_data |>
+    right_join(data.frame(shuffled_cluster = all_clusters), by = "shuffled_cluster") |>
+    mutate(mean_bs_cluster_shuffled = ifelse(is.na(mean_bs_cluster_shuffled), 0, mean_bs_cluster_shuffled))
+  
+  cluster_bs_perm_stats[i] <- var(shuffled_means$mean_bs_cluster_shuffled, na.rm = TRUE)
+}
+
+# p-value for observed group variance relative to permuted data
+p_value_bs <- mean(cluster_bs_perm_stats >= observed_stat_bs, na.rm = TRUE)
+
+print(paste("Observed Variance between Group Means:", observed_stat_bs))
+print(paste("P-value:", p_value_bs))
+
+cluster_bs_perm_stats_df <- data.frame(cluster_bs_perm_stats = cluster_bs_perm_stats)
+
+# Plot the null distribution with the observed statistic
+ggplot(cluster_bs_perm_stats_df, aes(x = cluster_bs_perm_stats)) +
+  geom_histogram(bins = 30, fill = "cyan3", color = "black", alpha = 0.7) +
+  geom_vline(xintercept = observed_stat_bs, color = "red1", linetype = "dashed", linewidth = 0.7) +
+  labs(
+    title = "Batter Score by Cluster - Null Distribution (Permuted Data)",
+    x = "Variance of Group Means",
+  ) +
+  theme_minimal()
+ggsave("batterscore_cluster_permutation.jpg", width = 10, height = 10, dpi = 300)
+```
+
+```{r}
+# confirm differences between clusters using kruskal test. more robust than anova and tukey's HSD due to multiple comparisons
+
+# bat speed
+kruskal.test(bat_speed ~ cluster, data = completed_data)
+dunnTest(bat_speed ~ cluster, data = completed_data, method = "bonferroni")
+
+# swing length
+kruskal.test(swing_length ~ cluster, data = completed_data)
+dunnTest(swing_length ~ cluster, data = completed_data, method = "bonferroni")
+
+# swing efficiency
+kruskal.test(swing_efficiency ~ cluster, data = completed_data)
+dunnTest(swing_efficiency ~ cluster, data = completed_data, method = "bonferroni")
+
+# swing combined
+kruskal.test(swing_combined ~ cluster, data = completed_data)
+dunnTest(swing_combined ~ cluster, data = completed_data, method = "bonferroni")
+
+# strike number
+kruskal.test(strikes ~ cluster, data = completed_data)
+dunnTest(strikes ~ cluster, data = completed_data, method = "bonferroni")
+
+# batter score
+kruskal.test(batter_score ~ cluster, data = completed_data)
+dunnTest(batter_score ~ cluster, data = completed_data, method = "bonferroni")
+```
+
+```{r}
+# mean rank comparisons for batter score
+ranked_data <- completed_data |>
+  mutate(rank = rank(batter_score),
+    cluster = as.factor(cluster))
+
+mean_ranks <- ranked_data |>
+  group_by(cluster) |>
+  summarise(mean_rank = mean(rank), .groups = "drop")
+
+# pairwise differences in mean ranks
+rank_values <- mean_ranks$mean_rank
+pairwise_mean_rank_diff <- combn(rank_values, 2, function(x) x[1] - x[2])
+pairwise_labels <- combn(as.character(mean_ranks$cluster), 2, function(x) paste(x[1], "-", x[2]))
+pairwise_rank_differences <- data.frame(
+  Comparison = unlist(pairwise_labels),
+  Mean_Rank_Difference = pairwise_mean_rank_diff
+)
+print(pairwise_rank_differences)
+```
+
+```{r}
+# visualize distribution of variables in the dataset by cluster
+
+completed_data |>
+  ggplot() +
+  geom_histogram(aes(x = release_speed)) +
+  facet_wrap(~ cluster) +
+  theme_dark()
+
+completed_data |>
+  ggplot() +
+  geom_histogram(aes(x = plate_z)) +
+  facet_wrap(~ cluster) +
+  theme_dark()
+
+completed_data |>
+  ggplot() +
+  geom_histogram(aes(x = zone)) +
+  facet_wrap(~ cluster) +
+  theme_dark()
+
+completed_data |>
+  ggplot() +
+  geom_histogram(aes(x = batter_pitcher_opposite)) +
+  facet_wrap(~ cluster) +
+  theme_dark()
+
+completed_data |>
+  ggplot() +
+  geom_histogram(aes(x = batter_days_since_prev_game)) +
+  facet_wrap(~ cluster) +
+  theme_dark()
+
+completed_data |>
+  ggplot() +
+  geom_histogram(aes(x = arm_angle)) +
+  facet_wrap(~ cluster) +
+  theme_dark()
+
+completed_data |>
+  ggplot() +
+  geom_histogram(aes(x = age_pit)) +
+  facet_wrap(~ cluster) +
+  theme_dark()
+
+completed_data |>
+  ggplot() +
+  geom_histogram(aes(x = age_bat)) +
+  facet_wrap(~ cluster) +
+  theme_dark()
+
+completed_data |>
+  ggplot() +
+  geom_bar(aes(x = spin_axis_group)) +
+  facet_wrap(~ cluster) +
+  theme_dark()
+
+completed_data |>
+  ggplot() +
+  geom_histogram(aes(x = release_pos_x)) +
+  facet_wrap(~ cluster) +
+  theme_dark()
+
+completed_data |>
+  ggplot() +
+  geom_histogram(aes(x = release_pos_z)) +
+  facet_wrap(~ cluster) +
+  theme_dark()
+
+completed_data |>
+  ggplot() +
+  geom_histogram(aes(x = pfx_x)) +
+  facet_wrap(~ cluster) +
+  theme_dark()
+
+completed_data |>
+  ggplot() +
+  geom_histogram(aes(x = pfx_z)) +
+  facet_wrap(~ cluster) +
+  theme_dark()
+
+completed_data |>
+  ggplot() +
+  geom_histogram(aes(x = plate_x)) +
+  facet_wrap(~ cluster) +
+  theme_dark()
+
+completed_data |>
+  ggplot() +
+  geom_histogram(aes(x = plate_z)) +
+  facet_wrap(~ cluster) +
+  theme_dark()
+
+completed_data |>
+  ggplot() +
+  geom_histogram(aes(x = outs_when_up)) +
+  facet_wrap(~ cluster) +
+  theme_dark()
+
+completed_data |>
+  ggplot() +
+  geom_histogram(aes(x = inning)) +
+  facet_wrap(~ cluster) +
+  theme_dark()
+
+completed_data |>
+  ggplot() +
+  geom_histogram(aes(x = vz0)) +
+  facet_wrap(~ cluster) +
+  theme_dark()
+
+completed_data |>
+  ggplot() +
+  geom_histogram(aes(x = hit_distance_sc)) +
+  facet_wrap(~ cluster) +
+  theme_dark()
+
+completed_data |>
+  ggplot() +
+  geom_histogram(aes(x = launch_speed)) +
+  facet_wrap(~ cluster) +
+  theme_dark()
+
+completed_data |>
+  ggplot() +
+  geom_histogram(aes(x = launch_angle)) +
+  facet_wrap(~ cluster) +
+  theme_dark()
+
+completed_data |>
+  ggplot() +
+  geom_histogram(aes(x = release_spin_rate)) +
+  facet_wrap(~ cluster) +
+  theme_dark()
+
+completed_data |>
+  ggplot() +
+  geom_histogram(aes(x = release_extension)) +
+  facet_wrap(~ cluster) +
+  theme_dark()
+
+completed_data |>
+  ggplot() +
+  geom_histogram(aes(x = release_pos_y)) +
+  facet_wrap(~ cluster) +
+  theme_dark()
+
+completed_data |>
+  ggplot() +
+  geom_histogram(aes(x = pitch_number)) +
+  facet_wrap(~ cluster) +
+  theme_dark()
+
+completed_data |>
+  ggplot() +
+  geom_histogram(aes(x = delta_run_exp)) +
+  facet_wrap(~ cluster) +
+  theme_dark()
+
+completed_data |>
+  ggplot() +
+  geom_histogram(aes(x = batter_score)) +
+  facet_wrap(~ cluster) +
+  theme_dark()
+
+completed_data |>
+  ggplot() +
+  geom_histogram(aes(x = hyper_speed)) +
+  facet_wrap(~ cluster) +
+  theme_dark()
+
+completed_data |>
+  ggplot() +
+  geom_histogram(aes(x = pitcher_days_since_prev_game)) +
+  facet_wrap(~ cluster) +
+  theme_dark()
+
+completed_data |>
+  ggplot() +
+  geom_histogram(aes(x = batter_days_since_prev_game)) +
+  facet_wrap(~ cluster) +
+  theme_dark()
+
+completed_data |>
+  ggplot() +
+  geom_histogram(aes(x = api_break_x_arm)) +
+  facet_wrap(~ cluster) +
+  theme_dark()
+
+completed_data |>
+  ggplot() +
+  geom_histogram(aes(x = api_break_x_batter_in)) +
+  facet_wrap(~ cluster) +
+  theme_dark()
+  
+completed_data |>
+  ggplot() +
+  geom_histogram(aes(x = arm_angle)) +
+  facet_wrap(~ cluster) +
+  theme_dark()
+
+completed_data |>
+  ggplot() +
+  geom_histogram(aes(x = swing_combined)) +
+  facet_wrap(~ cluster) +
+  theme_dark()
+
+completed_data |>
+  ggplot() +
+  geom_histogram(aes(x = swing_efficiency)) +
+  facet_wrap(~ cluster) +
+  theme_dark()
+
+completed_data |>
+  ggplot() +
+  geom_histogram(aes(x = pitch_combined)) +
+  facet_wrap(~ cluster) +
+  theme_dark()
+
+completed_data |>
+  ggplot() +
+  geom_histogram(aes(x = bat_team_lead)) +
+  facet_wrap(~ cluster) +
+  theme_dark()
+
+completed_data |>
+  ggplot() +
+  geom_histogram(aes(x = sz_height)) +
+  facet_wrap(~ cluster) +
+  theme_dark()
+```
+
+```{r}
+# strike number by cluster
+completed_data |>
+  ggplot(aes(group = strikes)) +
+  geom_bar(aes(x = strikes, fill = strikes), color = "black") +
+  facet_wrap(~ cluster) +
+  theme(legend.position = "none")
+ggsave("cluster_strike.jpg", width = 10, height = 10, dpi = 300)
+```
+
+```{r}
+# observe strike count distributions across clusters
+completed_data |>
+  group_by(strikes) |>
+  summarize(n = n())
+
+completed_data |>
+  group_by(cluster, strikes) |>
+  summarize(n = n())
+
+#almost same amount of strike 2 in second cluster as in first cluster despite the group being smaller in obs
+```
+
