@@ -8,4 +8,4 @@ Each code chunk has a comment explaining what the code does.
 
 There is an additional code file named additional_code.Rmd that contains code that was not used in the report or analysis.
 
-The shiny-app folder contains a shiny app where you can visualize cluster distributions. Open the file in R and press Run App. Ensure the data file located in the shiny-app folder is in your working directory.
+The shiny_app folder contains a shiny app where you can visualize cluster distributions. Open the file in R and press Run App. Ensure the data file located in the shiny_app folder is in your working directory.
