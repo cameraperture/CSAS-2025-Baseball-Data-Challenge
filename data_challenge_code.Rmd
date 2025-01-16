@@ -5,7 +5,7 @@ output: html_document
 date: "2025-01-15"
 ---
 ```{r}
-# load the packages needed
+# load the packages needed. install them first if you have not already
 library(tidyverse)
 library(imputeR)
 library(VIM)
