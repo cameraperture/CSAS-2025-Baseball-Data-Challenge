@@ -64,9 +64,8 @@ completed_data[categorical_vars] <- lapply(completed_data[categorical_vars], fun
   return(x)
 })
 
-# Define UI
 ui <- fluidPage(
-  titlePanel("Distributions by Cluster"),
+  titlePanel("CSAS 2025 Major League Baseball Data Challenge"),
   sidebarLayout(
     sidebarPanel(
       selectInput(
@@ -74,13 +73,20 @@ ui <- fluidPage(
         label = "Choose a Variable:",
         choices = setNames(names(variable_labels), variable_labels),  # Use friendly names
         selected = "release_speed"
-      )
+      ),
+      # Explanation text below the dropdown menu with clickable links
+      p("This dashboard visualizes the distributions of various MLB metrics by cluster from a k-means clustering algorithm. 
+         See the analysis report",
+        a("here", href="https://cameraperture.github.io/mlb_pdf.html", target="_blank"), ".",
+        "A full glossary of these metrics is available",
+        a("here", href="https://baseballsavant.mlb.com/csv-docs#pitch_type", target="_blank"), ".")
     ),
     mainPanel(
       uiOutput("plot_ui")  # Dynamically update UI
     )
   )
 )
+
 
 # Define Server
 server <- function(input, output, session) {
@@ -114,7 +120,7 @@ server <- function(input, output, session) {
     req(input$variable)  # Ensure a variable is selected
     
     ggplot(completed_data, aes(x = .data[[input$variable]], fill = factor(cluster))) +
-      geom_histogram(bins = 30, color = "black", alpha = 0.7, na.rm = TRUE) +  # Prevent NA errors
+      geom_histogram(aes(fill = cluster), bins = 30, color = "black", alpha = 0.7, na.rm = TRUE) +  # Prevent NA errors
       facet_wrap(~ cluster) +
       theme_dark() +
       theme(legend.position = "none") +
