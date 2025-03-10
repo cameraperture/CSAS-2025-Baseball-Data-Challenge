@@ -4,7 +4,7 @@ username: cameraperture
 account: cameraperture
 server: shinyapps.io
 hostUrl: https://api.shinyapps.io/v1
-appId: 14198657
-bundleId: 9916666
+appId: 14199301
+bundleId: 9917759
 url: https://cameraperture.shinyapps.io/shiny_app/
 version: 1

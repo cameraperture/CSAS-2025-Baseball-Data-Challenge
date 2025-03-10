@@ -114,7 +114,7 @@ server <- function(input, output, session) {
     req(input$variable)  # Ensure a variable is selected
     
     ggplot(completed_data, aes(x = .data[[input$variable]], fill = factor(cluster))) +
-      geom_histogram(aes(fill = cluster), bins = 30, color = "black", alpha = 0.7, na.rm = TRUE) +  # Prevent NA errors
+      geom_histogram(bins = 30, color = "black", alpha = 0.7, na.rm = TRUE) +  # Prevent NA errors
       facet_wrap(~ cluster) +
       theme_dark() +
       theme(legend.position = "none") +

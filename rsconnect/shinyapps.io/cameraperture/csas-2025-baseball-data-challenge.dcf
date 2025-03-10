@@ -1,0 +1,10 @@
+name: csas-2025-baseball-data-challenge
+title:
+username: cameraperture
+account: cameraperture
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 14198806
+bundleId: 9917737
+url: https://cameraperture.shinyapps.io/csas-2025-baseball-data-challenge/
+version: 1
